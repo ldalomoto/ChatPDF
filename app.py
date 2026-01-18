@@ -3,53 +3,78 @@ import os
 import hashlib
 import chromadb
 import google.generativeai as genai
+from typing import Tuple, Optional
 
+# Procesamiento de archivos
 from pypdf import PdfReader
+import docx
+import xml.etree.ElementTree as ET
+import pandas as pd
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 
 # ============================================================
 # CONFIGURACIÓN GENERAL
 # ============================================================
-st.set_page_config(page_title="Chat PDF con Gemini")
+st.set_page_config(page_title="Chat con Documentos + Gemini")
 
 # Carga variables de entorno desde .env
-# Aquí se espera GOOGLE_API_KEY=xxxx
 load_dotenv()
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 # Modelo de embeddings local
-# Se puede cambiar por otros modelos de sentence-transformers
 EMBEDDING_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
 
 # Se Inicializa el Cliente de ChromaDB
 client = chromadb.Client()
 
+# Extensiones soportadas
+SUPPORTED_EXTENSIONS = {
+    '.pdf': 'PDF',
+    '.docx': 'Word',
+    '.doc': 'Word',
+    '.txt': 'Texto',
+    '.xml': 'XML',
+    '.csv': 'CSV',
+    '.xlsx': 'Excel',
+    '.xls': 'Excel',
+}
+
 # ============================================================
 # SESSION STATE
 # ============================================================
-# session_state nos permite "recordar" cosas entre reruns.
 if "collection" not in st.session_state:
     st.session_state.collection = None
 
-if "pdf_processed" not in st.session_state:
-    st.session_state.pdf_processed = False
+if "file_processed" not in st.session_state:
+    st.session_state.file_processed = False
 
-if "pdf_hash" not in st.session_state:
-    st.session_state.pdf_hash = None
+if "file_hash" not in st.session_state:
+    st.session_state.file_hash = None
+
+if "file_name" not in st.session_state:
+    st.session_state.file_name = None
+
+if "file_type" not in st.session_state:
+    st.session_state.file_type = None
 
 # ============================================================
-# FUNCIONES
+# FUNCIONES DE EXTRACCIÓN DE TEXTO
 # ============================================================
-def hash_pdf(file) -> str:
+def hash_file(file) -> str:
+    """Genera hash único para cualquier archivo."""
     return hashlib.sha256(file.getvalue()).hexdigest()
 
-def extract_text_from_pdf(pdf_file):
-    """
-    Extrae texto de un PDF digital (no escaneado).
-    Incluye el número de página como marcador.
-    """
-    reader = PdfReader(pdf_file)
+def get_file_type(filename: str) -> Optional[Tuple[str, str]]:
+    """Determina el tipo de archivo basado en la extensión."""
+    _, ext = os.path.splitext(filename.lower())
+    if ext in SUPPORTED_EXTENSIONS:
+        return ext, SUPPORTED_EXTENSIONS[ext]
+    return None, None
+
+def extract_text_from_pdf(file) -> str:
+    """Extrae texto de un PDF."""
+    reader = PdfReader(file)
     text = ""
 
     for i, page in enumerate(reader.pages):
@@ -59,7 +84,97 @@ def extract_text_from_pdf(pdf_file):
 
     return text
 
+def extract_text_from_docx(file) -> str:
+    """Extrae texto de un archivo Word (.docx)."""
+    doc = docx.Document(file)
+    text = ""
+    
+    for i, para in enumerate(doc.paragraphs):
+        if para.text.strip():
+            text += f"\n[Párrafo {i+1}]\n{para.text}"
+    
+    return text
 
+def extract_text_from_txt(file) -> str:
+    """Extrae texto de un archivo de texto plano."""
+    return file.getvalue().decode('utf-8')
+
+def extract_text_from_xml(file) -> str:
+    """Extrae texto de un archivo XML."""
+    try:
+        content = file.getvalue().decode('utf-8')
+        root = ET.fromstring(content)
+        
+        # Función recursiva para extraer texto
+        def extract_xml_text(element, depth=0):
+            text = ""
+            if element.text and element.text.strip():
+                text += element.text.strip() + "\n"
+            for child in element:
+                text += extract_xml_text(child, depth + 1)
+            if element.tail and element.tail.strip():
+                text += element.tail.strip() + "\n"
+            return text
+        
+        return extract_xml_text(root)
+    except ET.ParseError as e:
+        return f"Error al parsear XML: {str(e)}\nContenido crudo:\n{file.getvalue().decode('utf-8', errors='ignore')}"
+
+def extract_text_from_csv(file) -> str:
+    """Extrae texto de un archivo CSV."""
+    try:
+        # Intentar diferentes encodings
+        content = file.getvalue()
+        for encoding in ['utf-8', 'latin-1', 'iso-8859-1']:
+            try:
+                df = pd.read_csv(pd.io.common.BytesIO(content), encoding=encoding)
+                text = f"Archivo CSV con {len(df)} filas y {len(df.columns)} columnas\n\n"
+                text += "Columnas: " + ", ".join(df.columns) + "\n\n"
+                text += "Primeras filas:\n" + df.head().to_string()
+                return text
+            except:
+                continue
+        return "No se pudo leer el archivo CSV con los encodings probados"
+    except Exception as e:
+        return f"Error al procesar CSV: {str(e)}"
+
+def extract_text_from_excel(file) -> str:
+    """Extrae texto de un archivo Excel."""
+    try:
+        df = pd.read_excel(file, sheet_name=None)  # Leer todas las hojas
+        
+        text = f"Archivo Excel con {len(df)} hojas\n\n"
+        
+        for sheet_name, sheet_data in df.items():
+            text += f"=== Hoja: {sheet_name} ===\n"
+            text += f"Forma: {sheet_data.shape[0]} filas x {sheet_data.shape[1]} columnas\n\n"
+            text += "Primeras filas:\n" + sheet_data.head().to_string() + "\n\n"
+        
+        return text
+    except Exception as e:
+        return f"Error al procesar Excel: {str(e)}"
+
+def extract_text_from_file(file, file_type: str) -> str:
+    """Extrae texto de cualquier tipo de archivo soportado."""
+    extraction_functions = {
+        '.pdf': extract_text_from_pdf,
+        '.docx': extract_text_from_docx,
+        '.doc': extract_text_from_docx,
+        '.txt': extract_text_from_txt,
+        '.xml': extract_text_from_xml,
+        '.csv': extract_text_from_csv,
+        '.xlsx': extract_text_from_excel,
+        '.xls': extract_text_from_excel,
+    }
+    
+    if file_type in extraction_functions:
+        return extraction_functions[file_type](file)
+    else:
+        return f"Tipo de archivo no soportado: {file_type}"
+
+# ============================================================
+# PROCESAMIENTO
+# ============================================================
 def chunk_text(text):
     """
     Divide un texto largo en fragmentos (chunks) con solapamiento.
@@ -122,8 +237,6 @@ def chunk_text(text):
     #    y devolvemos todos los fragmentos creados
     return chunks
 
-
-
 def create_chroma_collection(chunks):
     """
     Crea una colección nueva en ChromaDB a partir de los chunks generados.
@@ -137,9 +250,9 @@ def create_chroma_collection(chunks):
     # ------------------------------
     # 1️⃣ Borrado defensivo
     # ------------------------------
-    # Si ya existe una colección con el mismo nombre ("pdf_rag"),
+    # Si ya existe una colección con el mismo nombre ("document_rag"),
     try:
-        client.delete_collection("pdf_rag")
+        client.delete_collection("document_rag")
     except:
         # Si la colección no existe, Chroma lanza error.
         # Lo ignoramos porque es un caso esperado.
@@ -152,7 +265,8 @@ def create_chroma_collection(chunks):
     # - una tabla de documentos
     # - un índice vectorial
     # - espacio para metadatos
-    collection = client.create_collection(name="pdf_rag")
+
+    collection = client.create_collection(name="document_rag")
 
     # ------------------------------
     # 3️⃣ Separar texto de metadata
@@ -203,8 +317,6 @@ def create_chroma_collection(chunks):
     # - devolver chunks relevantes
     return collection
 
-
-
 def retrieve_context(collection, query, k=4):
     """
     Recupera los k chunks más similares a la pregunta.
@@ -219,11 +331,9 @@ def retrieve_context(collection, query, k=4):
 
     return results
 
-
 def ask_gemini(context, question):
     """
     Llama a Gemini usando el contexto recuperado.
-    El prompt fuerza comportamiento RAG (no inventar).
     """
     model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
 
@@ -245,38 +355,71 @@ Pregunta:
 # INTERFAZ
 # ============================================================
 
-st.title("📄 Chat con PDF + ChromaDB + Gemini")
+st.title("📄 Chat con Documentos + ChromaDB + Gemini")
 
-uploaded_pdf = st.file_uploader("Sube un PDF", type="pdf")
+# Mostrar tipos de archivo soportados
+st.markdown("**Formatos soportados:** " + ", ".join(sorted(set(SUPPORTED_EXTENSIONS.values()))))
 
-# 🔄 Detectar cambio de PDF y resetear estado
-if uploaded_pdf:
-    current_hash = hash_pdf(uploaded_pdf)
+uploaded_file = st.file_uploader(
+    "Sube un documento",
+    type=list(SUPPORTED_EXTENSIONS.keys())
+)
 
-    if st.session_state.pdf_hash != current_hash:
-        st.session_state.pdf_hash = current_hash
-        st.session_state.pdf_processed = False
-        st.session_state.collection = None
+if uploaded_file:
+    # Obtener tipo de archivo
+    ext, file_type_name = get_file_type(uploaded_file.name)
+    
+    if ext is None:
+        st.error(f"Tipo de archivo no soportado. Formatos aceptados: {', '.join(SUPPORTED_EXTENSIONS.keys())}")
+    else:
+        st.info(f"📁 Archivo: {uploaded_file.name} | Tipo: {file_type_name}")
+        
+        # 🔄 Detectar cambio de archivo y resetear estado
+        current_hash = hash_file(uploaded_file)
+
+        if st.session_state.file_hash != current_hash:
+            st.session_state.file_hash = current_hash
+            st.session_state.file_processed = False
+            st.session_state.collection = None
+            st.session_state.file_name = uploaded_file.name
+            st.session_state.file_type = file_type_name
 
 # ------------------------------
-# BOTÓN PROCESAR PDF
+# BOTÓN PROCESAR DOCUMENTO
 # ------------------------------
-if uploaded_pdf and not st.session_state.pdf_processed:
-    if st.button("📥 Procesar PDF"):
-        with st.spinner("Procesando PDF..."):
-            text = extract_text_from_pdf(uploaded_pdf)
-            chunks = chunk_text(text)
-            st.session_state.collection = create_chroma_collection(chunks)
-            st.session_state.pdf_processed = True
-
-        st.success(f"PDF procesado ✅ ({len(chunks)} fragmentos)")
+if uploaded_file and ext and not st.session_state.file_processed:
+    if st.button(f"📥 Procesar {file_type_name}"):
+        with st.spinner(f"Procesando {uploaded_file.name}..."):
+            try:
+                # Extraer texto del archivo
+                text = extract_text_from_file(uploaded_file, ext)
+                
+                if text.startswith("Error") or text.startswith("Tipo de archivo no soportado"):
+                    st.error(text)
+                else:
+                    # Mostrar vista previa del texto extraído
+                    with st.expander("📋 Vista previa del texto extraído"):
+                        st.text_area(
+                            "Texto extraído (primeros 2000 caracteres)",
+                            text[:2000] + ("..." if len(text) > 2000 else ""),
+                            height=200
+                        )
+                    
+                    # Procesar texto
+                    chunks = chunk_text(text)
+                    st.session_state.collection = create_chroma_collection(chunks)
+                    st.session_state.file_processed = True
+                    
+                    st.success(f"✅ Documento procesado ({len(chunks)} fragmentos)")
+            except Exception as e:
+                st.error(f"Error al procesar el archivo: {str(e)}")
 
 # ------------------------------
 # SECCIÓN DE PREGUNTAS
 # ------------------------------
-if st.session_state.pdf_processed and st.session_state.collection:
+if st.session_state.file_processed and st.session_state.collection:
     st.divider()
-    st.subheader("❓ Pregunta al documento")
+    st.subheader(f"❓ Pregunta al documento: {st.session_state.file_name}")
 
     question = st.text_input("Escribe tu pregunta")
 
