@@ -130,7 +130,7 @@ def extract_text_from_csv(file) -> str:
                 df = pd.read_csv(pd.io.common.BytesIO(content), encoding=encoding)
                 text = f"Archivo CSV con {len(df)} filas y {len(df.columns)} columnas\n\n"
                 text += "Columnas: " + ", ".join(df.columns) + "\n\n"
-                text += "Primeras filas:\n" + df.head().to_string()
+                text += "Primeras filas:\n" + df.head().to_string() #df.to_string() para leer todo / .head(#) para solo las primeras # filas
                 return text
             except:
                 continue
